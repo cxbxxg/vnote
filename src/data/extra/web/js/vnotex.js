@@ -79,6 +79,7 @@ class VNoteX extends EventEmitter {
         if (this.numOfOngoingWorkers == 0) {
             // Signal out anyway.
             this.emit('fullMarkdownRendered');
+            window.vxMarkdownAdapter.setWorkFinished();
 
             // Check pending work.
             if (this.pendingData.text) {
@@ -259,6 +260,15 @@ class VNoteX extends EventEmitter {
 
     showFindResult(p_text, p_totalMatches, p_currentMatchIndex) {
         window.vxMarkdownAdapter.setFindText(p_text, p_totalMatches, p_currentMatchIndex);
+    }
+
+    saveContent() {
+        if (!this.initialized) {
+            console.warn('saveContent() called before initialization');
+            window.vxMarkdownAdapter.setSavedContent('', '', '');
+            return;
+        }
+        window.vxMarkdownAdapter.setSavedContent("", Utils.fetchStyleContent(), this.contentContainer.innerHTML);
     }
 
     static detectOS() {

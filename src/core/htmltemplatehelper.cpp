@@ -7,12 +7,15 @@
 #include <utils/utils.h>
 #include <utils/fileutils.h>
 #include <utils/pathutils.h>
+#include <utils/htmlutils.h>
 #include <core/thememgr.h>
 #include <core/vnotex.h>
 
 using namespace vnotex;
 
 HtmlTemplateHelper::Template HtmlTemplateHelper::s_markdownViewerTemplate;
+
+static const QString c_globalStylesPlaceholder = "/* VX_GLOBAL_STYLES_PLACEHOLDER */";
 
 QString WebGlobalOptions::toJavascriptObject() const
 {
@@ -30,17 +33,12 @@ QString WebGlobalOptions::toJavascriptObject() const
            + QStringLiteral("}");
 }
 
-static bool isGlobalStyles(const ViewerResource::Resource &p_resource)
-{
-    return p_resource.m_name == QStringLiteral("global_styles");
-}
-
 // Read "global_styles" from resource and fill the holder with the content.
-static void fillGlobalStyles(QString &p_template, const ViewerResource &p_resource)
+static void fillGlobalStyles(QString &p_template, const WebResource &p_resource, const QString &p_additionalStyles)
 {
     QString styles;
     for (const auto &ele : p_resource.m_resources) {
-        if (isGlobalStyles(ele)) {
+        if (ele.isGlobal()) {
             if (ele.m_enabled) {
                 for (const auto &style : ele.m_styles) {
                     // Read the style file content.
@@ -52,9 +50,10 @@ static void fillGlobalStyles(QString &p_template, const ViewerResource &p_resour
         }
     }
 
+    styles += p_additionalStyles;
+
     if (!styles.isEmpty()) {
-        p_template.replace(QStringLiteral("/* VX_GLOBAL_STYLES_PLACEHOLDER */"),
-                           styles);
+        p_template.replace(c_globalStylesPlaceholder, styles);
     }
 }
 
@@ -76,13 +75,11 @@ static QString fillScriptTag(const QString &p_scriptFile)
     return QString("<script type=\"text/javascript\" src=\"%1\"></script>\n").arg(url.toString());
 }
 
-static void fillThemeStyles(QString &p_template)
+static void fillThemeStyles(QString &p_template, const QString &p_webStyleSheetFile, const QString &p_highlightStyleSheetFile)
 {
     QString styles;
-    const auto &themeMgr = VNoteX::getInst().getThemeMgr();
-
-    styles += fillStyleTag(themeMgr.getFile(Theme::File::WebStyleSheet));
-    styles += fillStyleTag(themeMgr.getFile(Theme::File::HighlightStyleSheet));
+    styles += fillStyleTag(p_webStyleSheetFile);
+    styles += fillStyleTag(p_highlightStyleSheetFile);
 
     if (!styles.isEmpty()) {
         p_template.replace(QStringLiteral("<!-- VX_THEME_STYLES_PLACEHOLDER -->"),
@@ -97,13 +94,13 @@ static void fillGlobalOptions(QString &p_template, const WebGlobalOptions &p_opt
 }
 
 // Read all other resources in @p_resource and fill the holder with proper resource path.
-static void fillResources(QString &p_template, const ViewerResource &p_resource)
+static void fillResources(QString &p_template, const WebResource &p_resource)
 {
     QString styles;
     QString scripts;
 
     for (const auto &ele : p_resource.m_resources) {
-        if (ele.m_enabled && !isGlobalStyles(ele)) {
+        if (ele.m_enabled && !ele.isGlobal()) {
             // Styles.
             for (const auto &style : ele.m_styles) {
                 auto styleFile = ConfigMgr::getInst().getUserOrAppFile(style);
@@ -129,6 +126,36 @@ static void fillResources(QString &p_template, const ViewerResource &p_resource)
     }
 }
 
+static void fillResourcesByContent(QString &p_template, const WebResource &p_resource)
+{
+    QString styles;
+    QString scripts;
+
+    for (const auto &ele : p_resource.m_resources) {
+        if (ele.m_enabled && !ele.isGlobal()) {
+            // Styles.
+            for (const auto &style : ele.m_styles) {
+                auto styleFile = ConfigMgr::getInst().getUserOrAppFile(style);
+                styles += FileUtils::readTextFile(styleFile);
+            }
+
+            // Scripts.
+            for (const auto &script : ele.m_scripts) {
+                auto scriptFile = ConfigMgr::getInst().getUserOrAppFile(script);
+                scripts += FileUtils::readTextFile(scriptFile);
+            }
+        }
+    }
+
+    if (!styles.isEmpty()) {
+        p_template.replace(QStringLiteral("/* VX_STYLES_PLACEHOLDER */"), styles);
+    }
+
+    if (!scripts.isEmpty()) {
+        p_template.replace(QStringLiteral("/* VX_SCRIPTS_PLACEHOLDER */"), scripts);
+    }
+}
+
 const QString &HtmlTemplateHelper::getMarkdownViewerTemplate()
 {
     return s_markdownViewerTemplate.m_template;
@@ -142,16 +169,30 @@ void HtmlTemplateHelper::updateMarkdownViewerTemplate(const MarkdownEditorConfig
 
     s_markdownViewerTemplate.m_revision = p_config.revision();
 
+    const auto &themeMgr = VNoteX::getInst().getThemeMgr();
+    s_markdownViewerTemplate.m_template =
+        generateMarkdownViewerTemplate(p_config,
+                                       themeMgr.getFile(Theme::File::WebStyleSheet),
+                                       themeMgr.getFile(Theme::File::HighlightStyleSheet),
+                                       false);
+}
+
+QString HtmlTemplateHelper::generateMarkdownViewerTemplate(const MarkdownEditorConfig &p_config,
+                                                           const QString &p_webStyleSheetFile,
+                                                           const QString &p_highlightStyleSheetFile,
+                                                           bool p_useTransparentBg)
+{
     const auto &viewerResource = p_config.getViewerResource();
+    const auto templateFile = ConfigMgr::getInst().getUserOrAppFile(viewerResource.m_template);
+    auto htmlTemplate = FileUtils::readTextFile(templateFile);
 
-    {
-        auto templateFile = ConfigMgr::getInst().getUserOrAppFile(viewerResource.m_template);
-        s_markdownViewerTemplate.m_template = FileUtils::readTextFile(templateFile);
+    QString additionalStyles;
+    if (p_useTransparentBg) {
+        additionalStyles = "body { background-color: transparent !important; }\n";
     }
+    fillGlobalStyles(htmlTemplate, viewerResource, additionalStyles);
 
-    fillGlobalStyles(s_markdownViewerTemplate.m_template, viewerResource);
-
-    fillThemeStyles(s_markdownViewerTemplate.m_template);
+    fillThemeStyles(htmlTemplate, p_webStyleSheetFile, p_highlightStyleSheetFile);
 
     {
         WebGlobalOptions opts;
@@ -165,8 +206,55 @@ void HtmlTemplateHelper::updateMarkdownViewerTemplate(const MarkdownEditorConfig
         opts.m_autoBreakEnabled = p_config.getAutoBreakEnabled();
         opts.m_linkifyEnabled = p_config.getLinkifyEnabled();
         opts.m_indentFirstLineEnabled = p_config.getIndentFirstLineEnabled();
-        fillGlobalOptions(s_markdownViewerTemplate.m_template, opts);
+        fillGlobalOptions(htmlTemplate, opts);
     }
 
-    fillResources(s_markdownViewerTemplate.m_template, viewerResource);
+    fillResources(htmlTemplate, viewerResource);
+
+    return htmlTemplate;
+}
+
+QString HtmlTemplateHelper::generateExportTemplate(const MarkdownEditorConfig &p_config,
+                                                   bool p_addOutlinePanel)
+{
+    auto exportResource = p_config.getExportResource();
+    const auto templateFile = ConfigMgr::getInst().getUserOrAppFile(exportResource.m_template);
+    auto htmlTemplate = FileUtils::readTextFile(templateFile);
+
+    fillGlobalStyles(htmlTemplate, exportResource, "");
+
+    // Outline panel.
+    for (auto &ele : exportResource.m_resources) {
+        if (ele.m_name == QStringLiteral("outline")) {
+            ele.m_enabled = p_addOutlinePanel;
+            break;
+        }
+    }
+
+    fillResourcesByContent(htmlTemplate, exportResource);
+
+    return htmlTemplate;
+}
+
+void HtmlTemplateHelper::fillTitle(QString &p_template, const QString &p_title)
+{
+    if (!p_title.isEmpty()) {
+        p_template.replace("<!-- VX_TITLE_PLACEHOLDER -->",
+                           QString("<title>%1</title>").arg(HtmlUtils::escapeHtml(p_title)));
+    }
+}
+
+void HtmlTemplateHelper::fillStyleContent(QString &p_template, const QString &p_styles)
+{
+    p_template.replace("/* VX_STYLES_CONTENT_PLACEHOLDER */", p_styles);
+}
+
+void HtmlTemplateHelper::fillHeadContent(QString &p_template, const QString &p_head)
+{
+    p_template.replace("<!-- VX_HEAD_PLACEHOLDER -->", p_head);
+}
+
+void HtmlTemplateHelper::fillBodyContent(QString &p_template, const QString &p_body)
+{
+    p_template.replace("<!-- VX_BODY_PLACEHOLDER -->", p_body);
 }
